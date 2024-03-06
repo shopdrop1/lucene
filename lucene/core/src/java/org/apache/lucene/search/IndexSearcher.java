@@ -21,7 +21,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
@@ -233,7 +235,13 @@ public class IndexSearcher {
             ? leaves ->
                 leaves.isEmpty()
                     ? new LeafSlice[0]
-                    : new LeafSlice[] {new LeafSlice(new ArrayList<>(leaves))}
+                    : new LeafSlice[] {
+                      new LeafSlice(
+                          new ArrayList<>(
+                              leaves.stream()
+                                  .map(LeafReaderContextPartition::createForEntireSegment)
+                                  .toList()))
+                    }
             : this::slices;
     leafSlicesSupplier = new CachingLeafSlicesSupplier(slicesProvider, leafContexts);
   }
@@ -328,42 +336,65 @@ public class IndexSearcher {
   /** Static method to segregate LeafReaderContexts amongst multiple slices */
   public static LeafSlice[] slices(
       List<LeafReaderContext> leaves, int maxDocsPerSlice, int maxSegmentsPerSlice) {
+
+    // TODO this is a temporary hack to force testing against multiple leaf reader context slices.
+    // It must be reverted.
+    maxDocsPerSlice = 1;
+    maxSegmentsPerSlice = 1;
+    // end hack
+
     // Make a copy so we can sort:
     List<LeafReaderContext> sortedLeaves = new ArrayList<>(leaves);
 
     // Sort by maxDoc, descending:
-    Collections.sort(
-        sortedLeaves, Collections.reverseOrder(Comparator.comparingInt(l -> l.reader().maxDoc())));
+    sortedLeaves.sort(Collections.reverseOrder(Comparator.comparingInt(l -> l.reader().maxDoc())));
 
-    final List<List<LeafReaderContext>> groupedLeaves = new ArrayList<>();
-    long docSum = 0;
-    List<LeafReaderContext> group = null;
+    final List<List<LeafReaderContextPartition>> groupedLeafPartitions = new ArrayList<>();
+    int currentSliceNumDocs = 0;
+    List<LeafReaderContextPartition> group = null;
     for (LeafReaderContext ctx : sortedLeaves) {
       if (ctx.reader().maxDoc() > maxDocsPerSlice) {
         assert group == null;
-        groupedLeaves.add(Collections.singletonList(ctx));
+        // if the segment does not fit in a single slice, we split it in multiple partitions of
+        // equal size
+        int numSlices = Math.ceilDiv(ctx.reader().maxDoc(), maxDocsPerSlice);
+        int numDocs = ctx.reader().maxDoc() / numSlices;
+        int maxDocId = numDocs;
+        int minDocId = 0;
+        for (int i = 0; i < numSlices - 1; i++) {
+          groupedLeafPartitions.add(
+              Collections.singletonList(
+                  LeafReaderContextPartition.createFromAndTo(ctx, minDocId, maxDocId)));
+          minDocId = maxDocId;
+          maxDocId += numDocs;
+        }
+        // the last slice gets all the remaining docs
+        groupedLeafPartitions.add(
+            Collections.singletonList(LeafReaderContextPartition.createFrom(ctx, minDocId)));
       } else {
         if (group == null) {
           group = new ArrayList<>();
-          group.add(ctx);
-
-          groupedLeaves.add(group);
-        } else {
-          group.add(ctx);
+          groupedLeafPartitions.add(group);
         }
+        group.add(LeafReaderContextPartition.createForEntireSegment(ctx));
 
-        docSum += ctx.reader().maxDoc();
-        if (group.size() >= maxSegmentsPerSlice || docSum > maxDocsPerSlice) {
+        currentSliceNumDocs += ctx.reader().maxDoc();
+        // We only split a segment when it does not fit entirely in a slice. We don't partition the
+        // segment that makes the current slice (which holds multiple segments) go over
+        // maxDocsPerSlice.
+        // This means that a slice either contains multiple entire segments, or a single partition
+        // of a segment.
+        if (group.size() >= maxSegmentsPerSlice || currentSliceNumDocs > maxDocsPerSlice) {
           group = null;
-          docSum = 0;
+          currentSliceNumDocs = 0;
         }
       }
     }
 
-    LeafSlice[] slices = new LeafSlice[groupedLeaves.size()];
+    LeafSlice[] slices = new LeafSlice[groupedLeafPartitions.size()];
     int upto = 0;
-    for (List<LeafReaderContext> currentLeaf : groupedLeaves) {
-      slices[upto] = new LeafSlice(currentLeaf);
+    for (List<LeafReaderContextPartition> currentGroup : groupedLeafPartitions) {
+      slices[upto] = new LeafSlice(currentGroup);
       ++upto;
     }
 
@@ -639,6 +670,18 @@ public class IndexSearcher {
   private <C extends Collector, T> T search(
       Weight weight, CollectorManager<C, T> collectorManager, C firstCollector) throws IOException {
     final LeafSlice[] leafSlices = getSlices();
+    // create holder for mutable state that is local to each search: slices share info in case
+    // multiple
+    // slices target the same segment, so that early termination is honoured
+    Map<LeafReaderContext, LeafReaderContextWrapper> contexts = new HashMap<>();
+    for (LeafSlice leafSlice : leafSlices) {
+      for (LeafReaderContextPartition leafReaderContextPartition : leafSlice.leaves) {
+        contexts.computeIfAbsent(leafReaderContextPartition.ctx, LeafReaderContextWrapper::new);
+      }
+    }
+    final Map<LeafReaderContext, LeafReaderContextWrapper> leafContexts =
+        Collections.unmodifiableMap(contexts);
+
     if (leafSlices.length == 0) {
       // there are no segments, nothing to offload to the executor, but we do need to call reduce to
       // create some kind of empty result
@@ -658,16 +701,77 @@ public class IndexSearcher {
       }
       final List<Callable<C>> listTasks = new ArrayList<>(leafSlices.length);
       for (int i = 0; i < leafSlices.length; ++i) {
-        final LeafReaderContext[] leaves = leafSlices[i].leaves;
+        final LeafReaderContextPartition[] leaves = leafSlices[i].leaves;
         final C collector = collectors.get(i);
         listTasks.add(
             () -> {
-              search(Arrays.asList(leaves), weight, collector);
+              search(leaves, weight, collector, leafContexts);
               return collector;
             });
       }
       List<C> results = taskExecutor.invokeAll(listTasks);
       return collectorManager.reduce(results);
+    }
+  }
+
+  // TODO this is a copy of the existing search protected method that takes a list of leaf reader
+  // contexts
+  // perhaps more methods need to be switched to use it in place of the other one?
+  protected void search(
+      LeafReaderContextPartition[] leaves,
+      Weight weight,
+      Collector collector,
+      Map<LeafReaderContext, LeafReaderContextWrapper> leafContexts)
+      throws IOException {
+
+    collector.setWeight(weight);
+
+    for (LeafReaderContextPartition slice : leaves) { // search each subreader
+      final LeafCollector leafCollector;
+      final LeafReaderContextWrapper leafReaderContextWrapper = leafContexts.get(slice.ctx);
+      synchronized (leafReaderContextWrapper) {
+        // The first slice that pulls the leaf collector for a certain segment may early terminate.
+        // When that happens, other slices won't even pull the leaf collector for the same segment.
+        // Otherwise, we would count multiple times for the same doc via Weight#count
+        if (leafReaderContextWrapper.earlyTerminated) {
+          continue;
+        }
+        try {
+          leafCollector = collector.getLeafCollector(leafReaderContextWrapper.ctx);
+        } catch (
+            @SuppressWarnings("unused")
+            CollectionTerminatedException e) {
+          leafReaderContextWrapper.earlyTerminated = true;
+          // there is no doc of interest in this reader context
+          // continue with the following leaf
+          continue;
+        }
+      }
+
+      LeafReaderContext ctx = leafReaderContextWrapper.ctx;
+
+      // TODO we are pulling bulk scorer twice for the same ctx. will that work?
+      BulkScorer scorer = weight.bulkScorer(ctx);
+      if (scorer != null) {
+        if (queryTimeout != null) {
+          scorer = new TimeLimitingBulkScorer(scorer, queryTimeout);
+        }
+        try {
+          scorer.score(leafCollector, ctx.reader().getLiveDocs(), slice.minDocId, slice.maxDocId);
+        } catch (
+            @SuppressWarnings("unused")
+            CollectionTerminatedException e) {
+          // collection was terminated prematurely
+          // continue with the following leaf
+        } catch (
+            @SuppressWarnings("unused")
+            TimeLimitingBulkScorer.TimeExceededException e) {
+          partialResult = true;
+        }
+      }
+      // Note: this is called if collection ran successfully, including the above special cases of
+      // CollectionTerminatedException and TimeExceededException, but no other exception.
+      leafCollector.finish();
     }
   }
 
@@ -685,6 +789,9 @@ public class IndexSearcher {
    * @throws TooManyClauses If a query would exceed {@link IndexSearcher#getMaxClauseCount()}
    *     clauses.
    */
+
+  // TODO legacy search method that does not support intra segment concurrency - what do we do about
+  // it?
   protected void search(List<LeafReaderContext> leaves, Weight weight, Collector collector)
       throws IOException {
 
@@ -873,11 +980,89 @@ public class IndexSearcher {
      *
      * @lucene.experimental
      */
-    public final LeafReaderContext[] leaves;
+    public final LeafReaderContextPartition[] leaves;
 
-    public LeafSlice(List<LeafReaderContext> leavesList) {
-      Collections.sort(leavesList, Comparator.comparingInt(l -> l.docBase));
-      this.leaves = leavesList.toArray(new LeafReaderContext[0]);
+    public LeafSlice(List<LeafReaderContextPartition> leafReaderContextPartitions) {
+      leafReaderContextPartitions.sort(Comparator.comparingInt(l -> l.ctx.docBase));
+      // TODO should we sort by minDocId too?
+      this.leaves = leafReaderContextPartitions.toArray(new LeafReaderContextPartition[0]);
+    }
+
+    /**
+     * Returns the total number of docs that a slice targets, by summing the number of docs that
+     * each of its leaf context partitions targets.
+     */
+    public int getNumDocs() {
+      return Arrays.stream(leaves)
+          .map(LeafReaderContextPartition::getNumDocs)
+          .reduce(Integer::sum)
+          .get();
+    }
+  }
+
+  /**
+   * Holds information about a specific leaf context and the corresponding range of doc ids to
+   * search within.
+   *
+   * @lucene.experimental
+   */
+  public static final class LeafReaderContextPartition {
+    private final int minDocId;
+    private final int maxDocId;
+    private final int numDocs;
+    public final LeafReaderContext ctx;
+
+    private LeafReaderContextPartition(
+        LeafReaderContext leafReaderContext, int minDocId, int maxDocId, int numDocs) {
+      this.ctx = leafReaderContext;
+      this.minDocId = minDocId;
+      this.maxDocId = maxDocId;
+      this.numDocs = numDocs;
+    }
+
+    /** Returns The number of docs that the doc id range of this partition targets */
+    public int getNumDocs() {
+      return numDocs;
+    }
+
+    /** Creates a partition of the provided leaf context that targets the entire segment */
+    public static LeafReaderContextPartition createForEntireSegment(LeafReaderContext ctx) {
+      return new LeafReaderContextPartition(
+          ctx, 0, DocIdSetIterator.NO_MORE_DOCS, ctx.reader().maxDoc());
+    }
+
+    /**
+     * Creates a partition of the provided leaf context that targets a subset of the entire segment,
+     * starting from the min doc id provided, until the end of the segment
+     */
+    public static LeafReaderContextPartition createFrom(LeafReaderContext ctx, int minDocId) {
+      return new LeafReaderContextPartition(
+          ctx, minDocId, DocIdSetIterator.NO_MORE_DOCS, ctx.reader().maxDoc() - minDocId);
+    }
+
+    public static LeafReaderContextPartition createFromAndTo(
+        LeafReaderContext ctx, int minDocId, int maxDocId) {
+      assert maxDocId != DocIdSetIterator.NO_MORE_DOCS;
+      return new LeafReaderContextPartition(ctx, minDocId, maxDocId, maxDocId - minDocId);
+    }
+  }
+
+  /**
+   * This class wraps a {@link LeafReaderContext}. The same instance is shared across slices that
+   * target the same leaf, in order to share info and have control over {@link
+   * Collector#getLeafCollector(LeafReaderContext)} calls that provide the same {@link
+   * LeafReaderContext} instance. The first time a leaf collector is pulled for a certain segment, a
+   * {@link CollectionTerminatedException} may be thrown, and in that case other slices pointing to
+   * that same segment will need to skip it.
+   */
+  // TODO find a better solution for the problem that this solves, or a better name for it at the
+  // very least.
+  public static class LeafReaderContextWrapper {
+    public final LeafReaderContext ctx;
+    private boolean earlyTerminated = false;
+
+    public LeafReaderContextWrapper(LeafReaderContext ctx) {
+      this.ctx = ctx;
     }
   }
 

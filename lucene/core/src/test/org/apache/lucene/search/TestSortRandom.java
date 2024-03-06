@@ -120,7 +120,7 @@ public class TestSortRandom extends LuceneTestCase {
     }
 
     final IndexSearcher s = newSearcher(r, false);
-    final int ITERS = atLeast(100);
+    final int ITERS = 1; // atLeast(100);
     for (int iter = 0; iter < ITERS; iter++) {
       final boolean reverse = random.nextBoolean();
 

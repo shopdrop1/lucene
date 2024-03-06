@@ -17,7 +17,9 @@
 package org.apache.lucene.tests.search;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -74,5 +76,19 @@ public class ScorerIndexSearcher extends IndexSearcher {
         }
       }
     }
+  }
+
+  @Override
+  protected void search(
+      LeafReaderContextPartition[] leaves,
+      Weight weight,
+      Collector collector,
+      Map<LeafReaderContext, LeafReaderContextWrapper> leafContexts)
+      throws IOException {
+    // TODO we should probably update this
+    search(
+        Arrays.stream(leaves).map(leafReaderContextSlice -> leafReaderContextSlice.ctx).toList(),
+        weight,
+        collector);
   }
 }

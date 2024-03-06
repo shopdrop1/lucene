@@ -2103,7 +2103,8 @@ public class TestLRUQueryCache extends LuceneTestCase {
       weight.scorer(context);
       assertEquals(List.of(query), allCache.cachedQueries());
       // Now we *do* have a fast count
-      assertEquals(2, weight.count(context));
+      Weight weight2 = searcher.createWeight(query, ScoreMode.COMPLETE_NO_SCORES, 1);
+      assertEquals(2, weight2.count(context));
     }
 
     w.deleteDocuments(new TermQuery(new Term("f", new BytesRef("b"))));

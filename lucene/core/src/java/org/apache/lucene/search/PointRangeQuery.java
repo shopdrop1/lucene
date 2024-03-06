@@ -363,6 +363,9 @@ public abstract class PointRangeQuery extends Query {
             final IntersectVisitor visitor = getIntersectVisitor(result);
             long cost = -1;
 
+            // maybe allowing calling get multiple times, or clone the scorer to avoid duplication
+            // across multiple
+            // slices that point to the same segment
             @Override
             public Scorer get(long leadCost) throws IOException {
               if (values.getDocCount() == reader.maxDoc()
@@ -374,6 +377,7 @@ public abstract class PointRangeQuery extends Query {
                 final FixedBitSet result = new FixedBitSet(reader.maxDoc());
                 result.set(0, reader.maxDoc());
                 long[] cost = new long[] {reader.maxDoc()};
+                // bitset etc.
                 values.intersect(getInverseIntersectVisitor(result, cost));
                 final DocIdSetIterator iterator = new BitSetIterator(result, cost[0]);
                 return new ConstantScoreScorer(weight, score(), scoreMode, iterator);

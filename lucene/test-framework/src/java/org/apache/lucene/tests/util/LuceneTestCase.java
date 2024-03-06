@@ -1949,7 +1949,9 @@ public abstract class LuceneTestCase extends Assert {
     } else {
       final ExecutorService ex;
       if (random.nextBoolean()) {
-        ex = null;
+        // TODO force concurrency more often: revert this change
+        // ex = null;
+        ex = executor;
       } else {
         ex = executor;
         if (VERBOSE) {

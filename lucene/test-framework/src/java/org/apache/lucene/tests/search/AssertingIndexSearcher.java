@@ -18,6 +18,7 @@ package org.apache.lucene.tests.search;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import org.apache.lucene.index.IndexReader;
@@ -77,6 +78,19 @@ public class AssertingIndexSearcher extends IndexSearcher {
     assert weight instanceof AssertingWeight;
     AssertingCollector assertingCollector = AssertingCollector.wrap(collector);
     super.search(leaves, weight, assertingCollector);
+    assert assertingCollector.hasFinishedCollectingPreviousLeaf;
+  }
+
+  @Override
+  protected void search(
+      LeafReaderContextPartition[] leaves,
+      Weight weight,
+      Collector collector,
+      Map<LeafReaderContext, LeafReaderContextWrapper> leafContexts)
+      throws IOException {
+    assert weight instanceof AssertingWeight;
+    AssertingCollector assertingCollector = AssertingCollector.wrap(collector);
+    super.search(leaves, weight, assertingCollector, leafContexts);
     assert assertingCollector.hasFinishedCollectingPreviousLeaf;
   }
 

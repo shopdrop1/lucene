@@ -198,7 +198,17 @@ public class TestSynonymQuery extends LuceneTestCase {
     if (topDocs.totalHits.value < totalHitsThreshold) {
       assertEquals(new TotalHits(11, TotalHits.Relation.EQUAL_TO), topDocs.totalHits);
     } else {
-      assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, topDocs.totalHits.relation);
+      /*
+      TODO: this is probably not the correct long term fix, yet it targets an edge case that I am not even sure we
+       should worry about. The problem already exists without intra-segment concurrency.
+      When a slice targets a single document, it does not early terminate, as the totalHitsThreshold check is
+      performed after collecting each doc. We will then get accurate results.
+       */
+      if (hasSingleDocSlice(searcher)) {
+        assertEquals(TotalHits.Relation.EQUAL_TO, topDocs.totalHits.relation);
+      } else {
+        assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, topDocs.totalHits.relation);
+      }
     }
     // All docs must have the same score
     for (int i = 0; i < topDocs.scoreDocs.length; ++i) {
@@ -258,7 +268,17 @@ public class TestSynonymQuery extends LuceneTestCase {
       assertEquals(TotalHits.Relation.EQUAL_TO, topDocs.totalHits.relation);
       assertEquals(22, topDocs.totalHits.value);
     } else {
-      assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, topDocs.totalHits.relation);
+      /*
+      TODO: this is probably not the correct long term fix, yet it targets an edge case that I am not even sure we
+       should worry about. The problem already exists without intra-segment concurrency.
+      When a slice targets a single document, it does not early terminate, as the totalHitsThreshold check is
+      performed after collecting each doc. We will then get accurate results.
+       */
+      if (hasSingleDocSlice(searcher)) {
+        assertEquals(TotalHits.Relation.EQUAL_TO, topDocs.totalHits.relation);
+      } else {
+        assertEquals(TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO, topDocs.totalHits.relation);
+      }
     }
     // All docs must have the same score
     for (int i = 0; i < topDocs.scoreDocs.length; ++i) {
@@ -268,6 +288,21 @@ public class TestSynonymQuery extends LuceneTestCase {
     reader.close();
     w.close();
     dir.close();
+  }
+
+  private static boolean hasSingleDocSlice(IndexSearcher searcher) {
+    IndexSearcher.LeafSlice[] slices = searcher.getSlices();
+    if (slices.length <= 1) {
+      return false;
+    }
+    for (IndexSearcher.LeafSlice slice : slices) {
+      for (IndexSearcher.LeafReaderContextPartition leafReaderContextPartition : slice.leaves) {
+        if (leafReaderContextPartition.getNumDocs() == 1) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   public void testMergeImpacts() throws IOException {

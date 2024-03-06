@@ -19,6 +19,7 @@ package org.apache.lucene.search;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
@@ -280,7 +281,10 @@ public class TestIndexSearcher extends LuceneTestCase {
           protected LeafSlice[] slices(List<LeafReaderContext> leaves) {
             ArrayList<LeafSlice> slices = new ArrayList<>();
             for (LeafReaderContext ctx : leaves) {
-              slices.add(new LeafSlice(Arrays.asList(ctx)));
+              slices.add(
+                  new LeafSlice(
+                      Collections.singletonList(
+                          LeafReaderContextPartition.createForEntireSegment(ctx))));
             }
             return slices.toArray(new LeafSlice[0]);
           }

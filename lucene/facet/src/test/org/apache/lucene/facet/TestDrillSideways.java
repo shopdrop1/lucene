@@ -1674,6 +1674,18 @@ public class TestDrillSideways extends FacetTestCase {
       super.search(leaves, weight, assertingCollector);
       assert assertingCollector.hasFinishedCollectingPreviousLeaf;
     }
+
+    @Override
+    protected void search(
+        LeafReaderContextPartition[] leaves,
+        Weight weight,
+        Collector collector,
+        Map<LeafReaderContext, LeafReaderContextWrapper> leafContexts)
+        throws IOException {
+      AssertingCollector assertingCollector = AssertingCollector.wrap(collector);
+      super.search(leaves, weight, assertingCollector, leafContexts);
+      assert assertingCollector.hasFinishedCollectingPreviousLeaf;
+    }
   }
 
   private static final class AssertingFacetsCollectorManager extends FacetsCollectorManager {

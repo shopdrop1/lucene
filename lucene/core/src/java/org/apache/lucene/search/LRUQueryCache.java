@@ -31,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -816,8 +817,18 @@ public class LRUQueryCache implements QueryCache, Accountable {
       };
     }
 
+    private final Map<LeafReaderContext, Boolean> seenContexts = new ConcurrentHashMap<>();
+
     @Override
     public int count(LeafReaderContext context) throws IOException {
+      // retrieve from the cache the result of count for a certain segment only the first time,
+      // following attempts for the same segment should skip the cache or we will end up retrieving
+      // from the cache
+      // what the first slice targeting that segment added to the cache, which leads to wrong hit
+      // counts
+      if (seenContexts.put(context, true) != null) {
+        return -1;
+      }
       // If the wrapped weight can count quickly then use that
       int innerCount = in.count(context);
       if (innerCount != -1) {

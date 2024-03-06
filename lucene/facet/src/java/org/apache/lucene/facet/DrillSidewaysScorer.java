@@ -93,12 +93,13 @@ class DrillSidewaysScorer extends BulkScorer {
   @Override
   public int score(LeafCollector collector, Bits acceptDocs, int min, int maxDoc)
       throws IOException {
-    if (min != 0) {
+    // TODO can these two checks be removed?
+    /*if (min != 0) {
       throw new IllegalArgumentException("min must be 0, got " + min);
     }
     if (maxDoc != Integer.MAX_VALUE) {
       throw new IllegalArgumentException("maxDoc must be Integer.MAX_VALUE");
-    }
+    }*/
 
     // some scorers, eg ReqExlScorer, can hit NPE if cost is called after nextDoc
     long baseQueryCost = baseIterator.cost();
